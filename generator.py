@@ -146,10 +146,12 @@ def generate_attestation_extension(challenge=b'123456'):
 
     # Root Of Trust
     rot = RootOfTrust()
-    rot.setComponentByName('verifiedBootKey', b'\x00'*32) # Dummy key
+    # Random 32 bytes for "hash" of public key
+    rot.setComponentByName('verifiedBootKey', bytes(random.getrandbits(8) for _ in range(32)))
     rot.setComponentByName('deviceLocked', True)
     rot.setComponentByName('verifiedBootState', 'Verified')
-    rot.setComponentByName('verifiedBootHash', b'\x00'*32) # Dummy hash
+    # Random 32 bytes for hash of boot image
+    rot.setComponentByName('verifiedBootHash', bytes(random.getrandbits(8) for _ in range(32)))
     tee_list.setComponentByName('rootOfTrust', rot)
 
     # OS Version: 12.0.0 -> 120000
