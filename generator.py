@@ -157,7 +157,8 @@ def main():
     # Subject/Issuer: serialNumber=<hex>
     # ==========================================
     root_key = generate_rsa_key_pair()
-    root_serial_dn = random_hex(16)
+    # Use the known Google Hardware Attestation Root Serial Number to mimic it
+    root_serial_dn = "f92009e853b6b045"
 
     # Note: Attributes must be in specific order? PyCa handles it.
     root_name = x509.Name([
