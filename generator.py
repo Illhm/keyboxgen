@@ -8,6 +8,37 @@ from xml.dom import minidom
 import random
 import string
 import uuid
+from pyasn1.type import univ, namedtype, tag, namedval
+from pyasn1.codec.der import encoder
+
+# === ASN.1 Definition for Android Key Attestation ===
+# Based on https://source.android.com/security/keystore/attestation
+
+class SecurityLevel(univ.Enumerated):
+    namedValues = namedval.NamedValues(
+        ('Software', 0),
+        ('TrustedEnvironment', 1),
+        ('StrongBox', 2)
+    )
+
+class AuthorizationList(univ.Sequence):
+    # AuthorizationList is a SEQUENCE of optional explicitly tagged fields.
+    # For a minimal valid structure, an empty sequence is acceptable as all fields are optional.
+    pass
+
+class KeyDescription(univ.Sequence):
+    componentType = namedtype.NamedTypes(
+        namedtype.NamedType('attestationVersion', univ.Integer()),
+        namedtype.NamedType('attestationSecurityLevel', SecurityLevel()),
+        namedtype.NamedType('keymasterVersion', univ.Integer()),
+        namedtype.NamedType('keymasterSecurityLevel', SecurityLevel()),
+        namedtype.NamedType('attestationChallenge', univ.OctetString()),
+        namedtype.NamedType('uniqueId', univ.OctetString()),
+        namedtype.NamedType('softwareEnforced', AuthorizationList()),
+        namedtype.NamedType('teeEnforced', AuthorizationList())
+    )
+
+# ====================================================
 
 def generate_key_pair():
     # SECP256R1 is standard for Android Keybox
@@ -16,11 +47,37 @@ def generate_key_pair():
 def random_string(length=8):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
+def generate_attestation_extension(challenge=b'123456'):
+    # Create the structure
+    key_desc = KeyDescription()
+    key_desc.setComponentByName('attestationVersion', 4) # Attestation v4 (Android 10/11)
+    key_desc.setComponentByName('attestationSecurityLevel', 'TrustedEnvironment')
+    key_desc.setComponentByName('keymasterVersion', 4) # KM v4
+    key_desc.setComponentByName('keymasterSecurityLevel', 'TrustedEnvironment')
+    key_desc.setComponentByName('attestationChallenge', challenge)
+    key_desc.setComponentByName('uniqueId', b'') # Empty for most cases
+
+    # Authorization Lists
+    # For a realistic look, we should populate "teeEnforced" with some tags.
+    # Tag 702 (purpose) = [2] (SIGN, VERIFY) -> Tag [702] EXPLICIT SET OF INTEGER
+    # But defining the full schema is huge.
+    # Empty sequences are valid for "everything optional".
+
+    # softwareEnforced
+    sw_list = AuthorizationList()
+    key_desc.setComponentByName('softwareEnforced', sw_list)
+
+    # teeEnforced
+    tee_list = AuthorizationList()
+    key_desc.setComponentByName('teeEnforced', tee_list)
+
+    return encoder.encode(key_desc)
+
 def create_certificate(subject_cn, issuer_cn, public_key, signing_key, serial_number=None, ca=False):
+    # This helper is for CA certs mostly. For Leaf, we use specific logic in main.
     if serial_number is None:
         serial_number = x509.random_serial_number()
 
-    # Randomize Organization slightly to be "fresh"
     org_name = f"Android OEM {random_string(4)}"
 
     subject = x509.Name([
@@ -31,15 +88,10 @@ def create_certificate(subject_cn, issuer_cn, public_key, signing_key, serial_nu
 
     issuer = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, issuer_cn),
-        # In a real chain, the issuer's subject matches the signer's subject.
-        # For simplicity here, we assume the issuer_cn passed in allows us to construct a plausible name,
-        # but for proper chaining verification, strict checking might require exact matching.
-        # Our checker verifies public key signature, which is the most important part.
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, org_name if subject_cn == issuer_cn else u"Android Root CA"),
         x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
     ])
 
-    # If self-signed root
     if subject_cn == issuer_cn:
         issuer = subject
 
@@ -47,10 +99,9 @@ def create_certificate(subject_cn, issuer_cn, public_key, signing_key, serial_nu
     builder = builder.subject_name(subject)
     builder = builder.issuer_name(issuer)
 
-    # Fresh validity window
     now = datetime.datetime.now(datetime.timezone.utc)
-    builder = builder.not_valid_before(now - datetime.timedelta(hours=1)) # Just to be safe with clock skew
-    builder = builder.not_valid_after(now + datetime.timedelta(days=365 * 10)) # 10 years
+    builder = builder.not_valid_before(now - datetime.timedelta(hours=1))
+    builder = builder.not_valid_after(now + datetime.timedelta(days=365 * 10))
 
     builder = builder.serial_number(serial_number)
     builder = builder.public_key(public_key)
@@ -62,7 +113,7 @@ def create_certificate(subject_cn, issuer_cn, public_key, signing_key, serial_nu
     certificate = builder.sign(
         private_key=signing_key, algorithm=hashes.SHA256(),
     )
-    return certificate, subject # Return subject to use as issuer for next
+    return certificate, subject
 
 def cert_to_pem(cert):
     return cert.public_bytes(serialization.Encoding.PEM).decode('utf-8')
@@ -82,20 +133,7 @@ def main():
 
     # 1. Root CA
     root_key = generate_key_pair()
-    root_cert, root_subject = create_certificate(u"Google Root CA (Fake)", u"Google Root CA (Fake)", root_key.public_key(), root_key, ca=True)
-
-    # 2. Intermediate CA
-    intermediate_key = generate_key_pair()
-    # We construct the issuer name manually or pass the object?
-    # For this simple script, we'll just reconstruct the issuer name structure in create_certificate based on string,
-    # or better, let's just make it simple. The checker primarily checks signatures.
-
-    # Let's fix create_certificate to take an actual Name object for issuer if provided
-    # ... actually let's just do it inline here for better control over the chain
-
-    # RE-DOING CHAIN GENERATION TO BE ROBUST
-
-    # ROOT
+    # Using more official-looking names
     root_name = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, u"Google Hardware Attestation Root"),
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Google Inc"),
@@ -111,7 +149,8 @@ def main():
     root_builder = root_builder.add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
     root_cert = root_builder.sign(private_key=root_key, algorithm=hashes.SHA256())
 
-    # INTERMEDIATE
+    # 2. Intermediate CA
+    intermediate_key = generate_key_pair()
     inter_name = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, u"Google Hardware Attestation Intermediate"),
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Google Inc"),
@@ -127,14 +166,15 @@ def main():
     inter_builder = inter_builder.add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
     inter_cert = inter_builder.sign(private_key=root_key, algorithm=hashes.SHA256())
 
-    # LEAF (DEVICE)
+    # 3. Leaf Certificate (Device)
+    device_key = generate_key_pair()
     leaf_name = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, u"Android Keystore Key"),
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Google Inc"),
         x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
-        x509.NameAttribute(NameOID.TITLE, u"TEE"), # Important for checker
+        # TEE title often used
     ])
-    device_key = generate_key_pair()
+
     leaf_builder = x509.CertificateBuilder()
     leaf_builder = leaf_builder.subject_name(leaf_name)
     leaf_builder = leaf_builder.issuer_name(inter_cert.subject)
@@ -143,8 +183,19 @@ def main():
     leaf_builder = leaf_builder.serial_number(x509.random_serial_number())
     leaf_builder = leaf_builder.public_key(device_key.public_key())
     leaf_builder = leaf_builder.add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-    leaf_cert = leaf_builder.sign(private_key=intermediate_key, algorithm=hashes.SHA256())
 
+    # Add Android Key Attestation Extension
+    attestation_oid = x509.ObjectIdentifier("1.3.6.1.4.1.11129.2.1.17")
+    attestation_data = generate_attestation_extension()
+
+    # The cryptography library requires us to wrap custom extensions in UnrecognizedExtension
+    # if we don't have a specific class for it registered.
+    leaf_builder = leaf_builder.add_extension(
+        x509.UnrecognizedExtension(attestation_oid, attestation_data),
+        critical=False
+    )
+
+    leaf_cert = leaf_builder.sign(private_key=intermediate_key, algorithm=hashes.SHA256())
 
     # Construct XML
     root = ET.Element("AndroidAttestation")

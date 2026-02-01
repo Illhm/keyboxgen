@@ -2,3 +2,5 @@ aiohttp
 cryptography
 requests
 colorama
+pyasn1
+pyasn1_modules
