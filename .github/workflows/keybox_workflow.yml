@@ -1,0 +1,42 @@
+name: Keybox Check
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  check-keybox:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Generate Fresh Keybox
+      run: python generator.py
+
+    - name: Run Keybox Checker
+      run: |
+        echo "Checking provided keybox (if any):"
+        # Use find or wildcard in case the name is tricky with spaces in CI
+        python checker.py "keybox (3).xml" || true
+
+        echo ""
+        echo "Checking generated keybox:"
+        python checker.py generated_keybox.xml
+
+    - name: Upload Generated Keybox
+      uses: actions/upload-artifact@v4
+      with:
+        name: fresh-keybox
+        path: generated_keybox.xml
+        retention-days: 5
