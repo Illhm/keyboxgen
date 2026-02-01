@@ -8,7 +8,7 @@ from xml.dom import minidom
 import random
 import string
 import uuid
-from pyasn1.type import univ, namedtype, tag, namedval
+from pyasn1.type import univ, namedtype, tag, namedval, constraint
 from pyasn1.codec.der import encoder
 
 # === ASN.1 Definition for Android Key Attestation ===
@@ -21,10 +21,41 @@ class SecurityLevel(univ.Enumerated):
         ('StrongBox', 2)
     )
 
+# Helper types with Explicit Tags
+class PurposeSet(univ.SetOf):
+    componentType = univ.Integer()
+    tagSet = univ.SetOf.tagSet.tagExplicitly(tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 1))
+
+class Algorithm(univ.Integer):
+    tagSet = univ.Integer.tagSet.tagExplicitly(tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 2))
+
+class KeySize(univ.Integer):
+    tagSet = univ.Integer.tagSet.tagExplicitly(tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 3))
+
+class DigestSet(univ.SetOf):
+    componentType = univ.Integer()
+    tagSet = univ.SetOf.tagSet.tagExplicitly(tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 5))
+
+class EcCurve(univ.Integer):
+    tagSet = univ.Integer.tagSet.tagExplicitly(tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 10))
+
+class OsVersion(univ.Integer):
+    tagSet = univ.Integer.tagSet.tagExplicitly(tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 705))
+
+class OsPatchLevel(univ.Integer):
+    tagSet = univ.Integer.tagSet.tagExplicitly(tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 706))
+
 class AuthorizationList(univ.Sequence):
-    # AuthorizationList is a SEQUENCE of optional explicitly tagged fields.
-    # For a minimal valid structure, an empty sequence is acceptable as all fields are optional.
-    pass
+    # Defining a subset of tags commonly found in TEE keys
+    componentType = namedtype.NamedTypes(
+        namedtype.OptionalNamedType('purpose', PurposeSet()),
+        namedtype.OptionalNamedType('algorithm', Algorithm()),
+        namedtype.OptionalNamedType('keySize', KeySize()),
+        namedtype.OptionalNamedType('digest', DigestSet()),
+        namedtype.OptionalNamedType('ecCurve', EcCurve()),
+        namedtype.OptionalNamedType('osVersion', OsVersion()),
+        namedtype.OptionalNamedType('osPatchLevel', OsPatchLevel())
+    )
 
 class KeyDescription(univ.Sequence):
     componentType = namedtype.NamedTypes(
@@ -50,25 +81,47 @@ def random_string(length=8):
 def generate_attestation_extension(challenge=b'123456'):
     # Create the structure
     key_desc = KeyDescription()
-    key_desc.setComponentByName('attestationVersion', 4) # Attestation v4 (Android 10/11)
+    key_desc.setComponentByName('attestationVersion', 4) # Attestation v4
     key_desc.setComponentByName('attestationSecurityLevel', 'TrustedEnvironment')
     key_desc.setComponentByName('keymasterVersion', 4) # KM v4
     key_desc.setComponentByName('keymasterSecurityLevel', 'TrustedEnvironment')
     key_desc.setComponentByName('attestationChallenge', challenge)
-    key_desc.setComponentByName('uniqueId', b'') # Empty for most cases
+    key_desc.setComponentByName('uniqueId', b'')
 
-    # Authorization Lists
-    # For a realistic look, we should populate "teeEnforced" with some tags.
-    # Tag 702 (purpose) = [2] (SIGN, VERIFY) -> Tag [702] EXPLICIT SET OF INTEGER
-    # But defining the full schema is huge.
-    # Empty sequences are valid for "everything optional".
-
-    # softwareEnforced
+    # softwareEnforced (Usually empty for TEE keys, or minimal)
     sw_list = AuthorizationList()
     key_desc.setComponentByName('softwareEnforced', sw_list)
 
     # teeEnforced
+    # Populate with realistic values for EC P-256
     tee_list = AuthorizationList()
+
+    # Purpose: SIGN(2), VERIFY(3)
+    purposes = PurposeSet()
+    purposes.setComponentByPosition(0, univ.Integer(2))
+    purposes.setComponentByPosition(1, univ.Integer(3))
+    tee_list.setComponentByName('purpose', purposes)
+
+    # Algorithm: EC(3)
+    tee_list.setComponentByName('algorithm', Algorithm(3))
+
+    # KeySize: 256
+    tee_list.setComponentByName('keySize', KeySize(256))
+
+    # Digest: SHA-2-256(4)
+    digests = DigestSet()
+    digests.setComponentByPosition(0, univ.Integer(4))
+    tee_list.setComponentByName('digest', digests)
+
+    # EcCurve: P-256(1)
+    tee_list.setComponentByName('ecCurve', EcCurve(1))
+
+    # OS Version: 12.0.0 -> 120000
+    tee_list.setComponentByName('osVersion', OsVersion(120000))
+
+    # OS Patch Level: YYYYMM -> 202502
+    tee_list.setComponentByName('osPatchLevel', OsPatchLevel(202502))
+
     key_desc.setComponentByName('teeEnforced', tee_list)
 
     return encoder.encode(key_desc)
@@ -133,7 +186,6 @@ def main():
 
     # 1. Root CA
     root_key = generate_key_pair()
-    # Using more official-looking names
     root_name = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, u"Google Hardware Attestation Root"),
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Google Inc"),
@@ -172,7 +224,7 @@ def main():
         x509.NameAttribute(NameOID.COMMON_NAME, u"Android Keystore Key"),
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Google Inc"),
         x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
-        # TEE title often used
+        x509.NameAttribute(NameOID.TITLE, u"TEE"), # Important for checker
     ])
 
     leaf_builder = x509.CertificateBuilder()
@@ -188,8 +240,6 @@ def main():
     attestation_oid = x509.ObjectIdentifier("1.3.6.1.4.1.11129.2.1.17")
     attestation_data = generate_attestation_extension()
 
-    # The cryptography library requires us to wrap custom extensions in UnrecognizedExtension
-    # if we don't have a specific class for it registered.
     leaf_builder = leaf_builder.add_extension(
         x509.UnrecognizedExtension(attestation_oid, attestation_data),
         critical=False
