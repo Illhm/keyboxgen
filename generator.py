@@ -2,7 +2,7 @@ import datetime
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 import random
@@ -71,12 +71,22 @@ class KeyDescription(univ.Sequence):
 
 # ====================================================
 
-def generate_key_pair():
+def generate_ec_key_pair():
     # SECP256R1 is standard for Android Keybox
     return ec.generate_private_key(ec.SECP256R1())
 
+def generate_rsa_key_pair():
+    # RSA 2048 is standard for Google Root
+    return rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048
+    )
+
 def random_string(length=8):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+
+def random_hex(length=16):
+    return ''.join(random.choices("0123456789abcdef", k=length))
 
 def generate_attestation_extension(challenge=b'123456'):
     # Create the structure
@@ -126,48 +136,6 @@ def generate_attestation_extension(challenge=b'123456'):
 
     return encoder.encode(key_desc)
 
-def create_certificate(subject_cn, issuer_cn, public_key, signing_key, serial_number=None, ca=False):
-    # This helper is for CA certs mostly. For Leaf, we use specific logic in main.
-    if serial_number is None:
-        serial_number = x509.random_serial_number()
-
-    org_name = f"Android OEM {random_string(4)}"
-
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, subject_cn),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, org_name),
-        x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
-    ])
-
-    issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, issuer_cn),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, org_name if subject_cn == issuer_cn else u"Android Root CA"),
-        x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
-    ])
-
-    if subject_cn == issuer_cn:
-        issuer = subject
-
-    builder = x509.CertificateBuilder()
-    builder = builder.subject_name(subject)
-    builder = builder.issuer_name(issuer)
-
-    now = datetime.datetime.now(datetime.timezone.utc)
-    builder = builder.not_valid_before(now - datetime.timedelta(hours=1))
-    builder = builder.not_valid_after(now + datetime.timedelta(days=365 * 10))
-
-    builder = builder.serial_number(serial_number)
-    builder = builder.public_key(public_key)
-
-    builder = builder.add_extension(
-        x509.BasicConstraints(ca=ca, path_length=None), critical=True,
-    )
-
-    certificate = builder.sign(
-        private_key=signing_key, algorithm=hashes.SHA256(),
-    )
-    return certificate, subject
-
 def cert_to_pem(cert):
     return cert.public_bytes(serialization.Encoding.PEM).decode('utf-8')
 
@@ -184,57 +152,131 @@ def main():
     device_id = random_string(16)
     print(f"Device ID: {device_id}")
 
-    # 1. Root CA
-    root_key = generate_key_pair()
+    # ==========================================
+    # 1. Root CA (RSA 2048)
+    # Subject/Issuer: serialNumber=<hex>
+    # ==========================================
+    root_key = generate_rsa_key_pair()
+    root_serial_dn = random_hex(16)
+
+    # Note: Attributes must be in specific order? PyCa handles it.
     root_name = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, u"Google Hardware Attestation Root"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Google Inc"),
-        x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
+        x509.NameAttribute(NameOID.SERIAL_NUMBER, root_serial_dn),
     ])
+
     root_builder = x509.CertificateBuilder()
     root_builder = root_builder.subject_name(root_name)
-    root_builder = root_builder.issuer_name(root_name)
-    root_builder = root_builder.not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-    root_builder = root_builder.not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650))
+    root_builder = root_builder.issuer_name(root_name) # Self-signed
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Valid for 20 years for root
+    root_builder = root_builder.not_valid_before(now - datetime.timedelta(hours=1))
+    root_builder = root_builder.not_valid_after(now + datetime.timedelta(days=365 * 20))
     root_builder = root_builder.serial_number(x509.random_serial_number())
     root_builder = root_builder.public_key(root_key.public_key())
+
+    # CA: TRUE
     root_builder = root_builder.add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+    # Key Usage: KeyCertSign, CRLSign
+    root_builder = root_builder.add_extension(
+        x509.KeyUsage(
+            digital_signature=False,
+            content_commitment=False,
+            key_encipherment=False,
+            data_encipherment=False,
+            key_agreement=False,
+            key_cert_sign=True,
+            crl_sign=True,
+            encipher_only=False,
+            decipher_only=False
+        ), critical=True
+    )
+
+    # Self-sign with RSA
     root_cert = root_builder.sign(private_key=root_key, algorithm=hashes.SHA256())
 
-    # 2. Intermediate CA
-    intermediate_key = generate_key_pair()
+    # ==========================================
+    # 2. Intermediate CA (ECDSA P-256)
+    # Subject: title=TEE, serialNumber=<hex>
+    # Issuer: Root Subject
+    # ==========================================
+    intermediate_key = generate_ec_key_pair()
+    inter_serial_dn = random_hex(32) # Inter often has longer serial? Valid report says 32 chars (16 bytes hex)
+
     inter_name = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, u"Google Hardware Attestation Intermediate"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Google Inc"),
-        x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
+        x509.NameAttribute(NameOID.TITLE, u"TEE"),
+        x509.NameAttribute(NameOID.SERIAL_NUMBER, inter_serial_dn),
     ])
+
     inter_builder = x509.CertificateBuilder()
     inter_builder = inter_builder.subject_name(inter_name)
     inter_builder = inter_builder.issuer_name(root_cert.subject)
-    inter_builder = inter_builder.not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-    inter_builder = inter_builder.not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650))
+
+    # Valid for 10 years
+    inter_builder = inter_builder.not_valid_before(now - datetime.timedelta(hours=1))
+    inter_builder = inter_builder.not_valid_after(now + datetime.timedelta(days=365 * 10))
     inter_builder = inter_builder.serial_number(x509.random_serial_number())
     inter_builder = inter_builder.public_key(intermediate_key.public_key())
+
+    # CA: TRUE
     inter_builder = inter_builder.add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+    # Key Usage: KeyCertSign, CRLSign
+    inter_builder = inter_builder.add_extension(
+        x509.KeyUsage(
+            digital_signature=False,
+            content_commitment=False,
+            key_encipherment=False,
+            data_encipherment=False,
+            key_agreement=False,
+            key_cert_sign=True,
+            crl_sign=True,
+            encipher_only=False,
+            decipher_only=False
+        ), critical=True
+    )
+
+    # Signed by Root (RSA)
     inter_cert = inter_builder.sign(private_key=root_key, algorithm=hashes.SHA256())
 
-    # 3. Leaf Certificate (Device)
-    device_key = generate_key_pair()
+    # ==========================================
+    # 3. Leaf Certificate (ECDSA P-256)
+    # Subject: title=TEE, serialNumber=<hex>
+    # Issuer: Intermediate Subject
+    # ==========================================
+    device_key = generate_ec_key_pair()
+    leaf_serial_dn = random_hex(32)
+
     leaf_name = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, u"Android Keystore Key"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Google Inc"),
-        x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
-        x509.NameAttribute(NameOID.TITLE, u"TEE"), # Important for checker
+        x509.NameAttribute(NameOID.TITLE, u"TEE"),
+        x509.NameAttribute(NameOID.SERIAL_NUMBER, leaf_serial_dn),
     ])
 
     leaf_builder = x509.CertificateBuilder()
     leaf_builder = leaf_builder.subject_name(leaf_name)
     leaf_builder = leaf_builder.issuer_name(inter_cert.subject)
-    leaf_builder = leaf_builder.not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-    leaf_builder = leaf_builder.not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650))
+
+    # Valid for 10 years
+    leaf_builder = leaf_builder.not_valid_before(now - datetime.timedelta(hours=1))
+    leaf_builder = leaf_builder.not_valid_after(now + datetime.timedelta(days=365 * 10))
     leaf_builder = leaf_builder.serial_number(x509.random_serial_number())
     leaf_builder = leaf_builder.public_key(device_key.public_key())
+
+    # CA: FALSE
     leaf_builder = leaf_builder.add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+    # Key Usage: DigitalSignature...
+    leaf_builder = leaf_builder.add_extension(
+        x509.KeyUsage(
+            digital_signature=True,
+            content_commitment=False,
+            key_encipherment=False,
+            data_encipherment=False,
+            key_agreement=False, # For EC
+            key_cert_sign=False,
+            crl_sign=False,
+            encipher_only=False,
+            decipher_only=False
+        ), critical=True
+    )
 
     # Add Android Key Attestation Extension
     attestation_oid = x509.ObjectIdentifier("1.3.6.1.4.1.11129.2.1.17")
@@ -245,6 +287,7 @@ def main():
         critical=False
     )
 
+    # Signed by Intermediate (ECDSA)
     leaf_cert = leaf_builder.sign(private_key=intermediate_key, algorithm=hashes.SHA256())
 
     # Construct XML
