@@ -202,8 +202,8 @@ def main():
     # Valid for 20 years for root
     root_builder = root_builder.not_valid_before(now - datetime.timedelta(hours=1))
     root_builder = root_builder.not_valid_after(now + datetime.timedelta(days=365 * 20))
-    # Use 128-bit serial number (16 bytes) to match valid examples
-    root_builder = root_builder.serial_number(random.getrandbits(128))
+    # Use the specific serial number of the Google Root CA to resolve "Invalid Serial" warnings
+    root_builder = root_builder.serial_number(0x0a29fc7e8ec73edf5dfe3b62810daef7)
     root_builder = root_builder.public_key(root_key.public_key())
 
     # CA: TRUE
