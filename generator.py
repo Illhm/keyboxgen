@@ -168,9 +168,10 @@ def cert_to_pem(cert):
     return cert.public_bytes(serialization.Encoding.PEM).decode('utf-8')
 
 def key_to_pem(key):
+    # Use TraditionalOpenSSL to get 'BEGIN EC PRIVATE KEY' format which is standard for Android Keyboxes
     return key.private_bytes(
         encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.NoEncryption()
     ).decode('utf-8')
 
@@ -201,7 +202,8 @@ def main():
     # Valid for 20 years for root
     root_builder = root_builder.not_valid_before(now - datetime.timedelta(hours=1))
     root_builder = root_builder.not_valid_after(now + datetime.timedelta(days=365 * 20))
-    root_builder = root_builder.serial_number(x509.random_serial_number())
+    # Use 128-bit serial number (16 bytes) to match valid examples
+    root_builder = root_builder.serial_number(random.getrandbits(128))
     root_builder = root_builder.public_key(root_key.public_key())
 
     # CA: TRUE
@@ -244,7 +246,7 @@ def main():
     # Valid for 10 years
     inter_builder = inter_builder.not_valid_before(now - datetime.timedelta(hours=1))
     inter_builder = inter_builder.not_valid_after(now + datetime.timedelta(days=365 * 10))
-    inter_builder = inter_builder.serial_number(x509.random_serial_number())
+    inter_builder = inter_builder.serial_number(random.getrandbits(128))
     inter_builder = inter_builder.public_key(intermediate_key.public_key())
 
     # CA: TRUE
@@ -287,7 +289,7 @@ def main():
     # Valid for 10 years
     leaf_builder = leaf_builder.not_valid_before(now - datetime.timedelta(hours=1))
     leaf_builder = leaf_builder.not_valid_after(now + datetime.timedelta(days=365 * 10))
-    leaf_builder = leaf_builder.serial_number(x509.random_serial_number())
+    leaf_builder = leaf_builder.serial_number(random.getrandbits(128))
     leaf_builder = leaf_builder.public_key(device_key.public_key())
 
     # CA: FALSE
