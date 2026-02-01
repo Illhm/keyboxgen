@@ -73,7 +73,7 @@ def get_overall_status(status, keychain_status, cert_status, google_status):
         if "Valid." in keychain_status:
             if "Unknown / Software" in cert_status:
                 if google_status == "null":
-                    return f"{Fore.YELLOW}Valid. (Software signed)"
+                    return f"{Fore.GREEN}Valid. (Software signed)"
                 else:
                     return f"{Fore.YELLOW}Check status reason: {status['reason']}"
             elif any(x in cert_status for x in ["AOSP Software Attestation", "Samsung Knox Attestation", "Google Hardware Attestation"]):

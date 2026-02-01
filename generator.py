@@ -91,10 +91,10 @@ def random_hex(length=16):
 def generate_attestation_extension(challenge=b'123456'):
     # Create the structure
     key_desc = KeyDescription()
-    key_desc.setComponentByName('attestationVersion', 4) # Attestation v4
-    key_desc.setComponentByName('attestationSecurityLevel', 'TrustedEnvironment')
-    key_desc.setComponentByName('keymasterVersion', 4) # KM v4
-    key_desc.setComponentByName('keymasterSecurityLevel', 'TrustedEnvironment')
+    key_desc.setComponentByName('attestationVersion', 300) # Attestation v3 (Android 12)
+    key_desc.setComponentByName('attestationSecurityLevel', 'StrongBox')
+    key_desc.setComponentByName('keymasterVersion', 300) # KM v3
+    key_desc.setComponentByName('keymasterSecurityLevel', 'StrongBox')
     key_desc.setComponentByName('attestationChallenge', challenge)
     key_desc.setComponentByName('uniqueId', b'')
 
