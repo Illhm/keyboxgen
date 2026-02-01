@@ -21,6 +21,23 @@ class SecurityLevel(univ.Enumerated):
         ('StrongBox', 2)
     )
 
+class VerifiedBootState(univ.Enumerated):
+    namedValues = namedval.NamedValues(
+        ('Verified', 0),
+        ('SelfSigned', 1),
+        ('Unverified', 2),
+        ('Failed', 3)
+    )
+
+class RootOfTrust(univ.Sequence):
+    componentType = namedtype.NamedTypes(
+        namedtype.NamedType('verifiedBootKey', univ.OctetString()),
+        namedtype.NamedType('deviceLocked', univ.Boolean()),
+        namedtype.NamedType('verifiedBootState', VerifiedBootState()),
+        namedtype.NamedType('verifiedBootHash', univ.OctetString())
+    )
+    tagSet = univ.Sequence.tagSet.tagExplicitly(tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 704))
+
 # Helper types with Explicit Tags
 class PurposeSet(univ.SetOf):
     componentType = univ.Integer()
@@ -53,6 +70,7 @@ class AuthorizationList(univ.Sequence):
         namedtype.OptionalNamedType('keySize', KeySize()),
         namedtype.OptionalNamedType('digest', DigestSet()),
         namedtype.OptionalNamedType('ecCurve', EcCurve()),
+        namedtype.OptionalNamedType('rootOfTrust', RootOfTrust()),
         namedtype.OptionalNamedType('osVersion', OsVersion()),
         namedtype.OptionalNamedType('osPatchLevel', OsPatchLevel())
     )
@@ -125,6 +143,14 @@ def generate_attestation_extension(challenge=b'123456'):
 
     # EcCurve: P-256(1)
     tee_list.setComponentByName('ecCurve', EcCurve(1))
+
+    # Root Of Trust
+    rot = RootOfTrust()
+    rot.setComponentByName('verifiedBootKey', b'\x00'*32) # Dummy key
+    rot.setComponentByName('deviceLocked', True)
+    rot.setComponentByName('verifiedBootState', 'Verified')
+    rot.setComponentByName('verifiedBootHash', b'\x00'*32) # Dummy hash
+    tee_list.setComponentByName('rootOfTrust', rot)
 
     # OS Version: 12.0.0 -> 120000
     tee_list.setComponentByName('osVersion', OsVersion(120000))
